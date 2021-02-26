@@ -188,6 +188,15 @@ namespace SQLite
 		/// </summary>
 		public int LibVersionNumber { get; private set; }
 
+		private IColumnInformationProvider _columnInformationProvider;
+		public IColumnInformationProvider ColumnInformationProvider {
+			get { return _columnInformationProvider; }
+			set {
+				_columnInformationProvider = value;
+				Orm.ColumnInformationProvider = _columnInformationProvider ?? new DefaultColumnInformationProvider ();
+			}
+		}
+
 		/// <summary>
 		/// Whether Trace lines should be written that show the execution time of queries.
 		/// </summary>
@@ -458,12 +467,12 @@ namespace SQLite
 			lock (_mappings) {
 				if (_mappings.TryGetValue (key, out map)) {
 					if (createFlags != CreateFlags.None && createFlags != map.CreateFlags) {
-						map = new TableMapping (type, createFlags);
+						map = new TableMapping (type, createFlags, _columnInformationProvider);
 						_mappings[key] = map;
 					}
 				}
 				else {
-					map = new TableMapping (type, createFlags);
+					map = new TableMapping (type, createFlags, _columnInformationProvider);
 					_mappings.Add (key, map);
 				}
 			}
@@ -2444,8 +2453,13 @@ namespace SQLite
 		readonly Column[] _insertColumns;
 		readonly Column[] _insertOrReplaceColumns;
 
-		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None)
+		public TableMapping (Type type, CreateFlags createFlags = CreateFlags.None, IColumnInformationProvider infoProvider = null)
 		{
+			if (infoProvider == null)
+			{
+				infoProvider = new DefaultColumnInformationProvider ();
+			}
+
 			MappedType = type;
 			CreateFlags = createFlags;
 
@@ -2486,9 +2500,9 @@ namespace SQLite
 
 			var cols = new List<Column> ();
 			foreach (var p in props) {
-				var ignore = p.IsDefined (typeof (IgnoreAttribute), true);
+				var ignore = infoProvider.IsIgnored(p);
 				if (!ignore) {
-					cols.Add (new Column (p, createFlags));
+					cols.Add (new Column (p, createFlags, infoProvider));
 				}
 			}
 			Columns = cols.ToArray ();
@@ -2575,19 +2589,18 @@ namespace SQLite
 
 			public bool StoreAsText { get; private set; }
 
-			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None)
+			public Column (PropertyInfo prop, CreateFlags createFlags = CreateFlags.None, IColumnInformationProvider infoProvider = null)
 			{
 				var colAttr = prop.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
 
+				if (infoProvider == null)
+				{
+					infoProvider = new DefaultColumnInformationProvider ();
+				}
+				
 				_prop = prop;
-#if ENABLE_IL2CPP
-                var ca = prop.GetCustomAttribute(typeof(ColumnAttribute)) as ColumnAttribute;
-				Name = ca == null ? prop.Name : ca.Name;
-#else
-				Name = (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
-						colAttr.ConstructorArguments[0].Value?.ToString () :
-						prop.Name;
-#endif
+				Name = infoProvider.GetColumnName(prop);
+
 				//If this type is Nullable<T> then Nullable.GetUnderlyingType returns the T, otherwise it returns null, so get the actual type instead
 				ColumnType = Nullable.GetUnderlyingType (prop.PropertyType) ?? prop.PropertyType;
 				Collation = Orm.Collation (prop);
@@ -2697,6 +2710,13 @@ namespace SQLite
 			return obj.GetType ();
 		}
 
+		private static IColumnInformationProvider _columnInformationProvider = new DefaultColumnInformationProvider();
+		public static IColumnInformationProvider ColumnInformationProvider
+		{
+			get { return _columnInformationProvider; }
+			set { _columnInformationProvider = value; }
+		}
+
 		public static string SqlDecl (TableMapping.Column p, bool storeDateTimeAsTicks, bool storeTimeSpanAsTicks)
 		{
 			string decl = "\"" + p.Name + "\" " + SqlType (p, storeDateTimeAsTicks, storeTimeSpanAsTicks) + " ";
@@ -2762,28 +2782,17 @@ namespace SQLite
 
 		public static bool IsPK (MemberInfo p)
 		{
-			return p.CustomAttributes.Any (x => x.AttributeType == typeof (PrimaryKeyAttribute));
+			return ColumnInformationProvider.IsPK(p);
 		}
 
 		public static string Collation (MemberInfo p)
 		{
-#if ENABLE_IL2CPP
-			return (p.GetCustomAttribute<CollationAttribute> ()?.Value) ?? "";
-#else
-			return
-				(p.CustomAttributes
-				 .Where (x => typeof (CollationAttribute) == x.AttributeType)
-				 .Select (x => {
-					 var args = x.ConstructorArguments;
-					 return args.Count > 0 ? ((args[0].Value as string) ?? "") : "";
-				 })
-				 .FirstOrDefault ()) ?? "";
-#endif
+			 return ColumnInformationProvider.Collation (p);
 		}
 
 		public static bool IsAutoInc (MemberInfo p)
 		{
-			return p.CustomAttributes.Any (x => x.AttributeType == typeof (AutoIncrementAttribute));
+			return ColumnInformationProvider.IsAutoInc(p);
 		}
 
 		public static FieldInfo GetField (TypeInfo t, string name)
@@ -2825,34 +2834,17 @@ namespace SQLite
 
 		public static IEnumerable<IndexedAttribute> GetIndices (MemberInfo p)
 		{
-#if ENABLE_IL2CPP
-			return p.GetCustomAttributes<IndexedAttribute> ();
-#else
-			var indexedInfo = typeof (IndexedAttribute).GetTypeInfo ();
-			return
-				p.CustomAttributes
-				 .Where (x => indexedInfo.IsAssignableFrom (x.AttributeType.GetTypeInfo ()))
-				 .Select (x => (IndexedAttribute)InflateAttribute (x));
-#endif
+			return ColumnInformationProvider.GetIndices(p);
 		}
 
 		public static int? MaxStringLength (PropertyInfo p)
 		{
-#if ENABLE_IL2CPP
-			return p.GetCustomAttribute<MaxLengthAttribute> ()?.Value;
-#else
-			var attr = p.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (MaxLengthAttribute));
-			if (attr != null) {
-				var attrv = (MaxLengthAttribute)InflateAttribute (attr);
-				return attrv.Value;
-			}
-			return null;
-#endif
+			return ColumnInformationProvider.MaxStringLength(p);
 		}
 
 		public static bool IsMarkedNotNull (MemberInfo p)
 		{
-			return p.CustomAttributes.Any (x => x.AttributeType == typeof (NotNullAttribute));
+			return ColumnInformationProvider.IsMarkedNotNull(p);
 		}
 	}
 
@@ -4768,5 +4760,102 @@ namespace SQLite
 			Blob = 4,
 			Null = 5
 		}
+	}
+
+	public interface IColumnInformationProvider
+	{
+		bool IsPK(MemberInfo m);
+		string Collation(MemberInfo m);
+		bool IsAutoInc(MemberInfo m);
+		int? MaxStringLength(PropertyInfo p);
+		IEnumerable<IndexedAttribute> GetIndices(MemberInfo p);
+		bool IsMarkedNotNull(MemberInfo p);
+		bool IsIgnored(PropertyInfo p);
+		string GetColumnName(PropertyInfo p);
+	}
+
+	public class DefaultColumnInformationProvider : IColumnInformationProvider
+	{
+		#region IColumnInformationProvider implementation
+
+		public string GetColumnName(PropertyInfo p)
+		{
+#if ENABLE_IL2CPP
+			var ca = p.GetCustomAttribute(typeof(ColumnAttribute)) as ColumnAttribute;
+			Name = ca == null ? p.Name : ca.Name;
+#else
+			var colAttr = p.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof (ColumnAttribute));
+
+			return (colAttr != null && colAttr.ConstructorArguments.Count > 0) ?
+					colAttr.ConstructorArguments[0].Value?.ToString () :
+					p.Name;
+#endif
+		}
+
+		public bool IsIgnored(PropertyInfo p)
+		{
+			return p.IsDefined(typeof (IgnoreAttribute), true);
+		}
+
+		public IEnumerable<IndexedAttribute> GetIndices(MemberInfo p)
+		{
+#if ENABLE_IL2CPP
+			return m.GetCustomAttributes<IndexedAttribute> ();
+#else
+			var indexedInfo = typeof (IndexedAttribute).GetTypeInfo ();
+			return
+				p.CustomAttributes
+				 .Where (x => indexedInfo.IsAssignableFrom (x.AttributeType.GetTypeInfo ()))
+				 .Select (x => (IndexedAttribute) Orm.InflateAttribute (x));
+#endif
+		}
+
+		public bool IsPK(MemberInfo m)
+		{
+			return m.CustomAttributes.Any (x => x.AttributeType == typeof (PrimaryKeyAttribute));
+		}
+
+		public string Collation(MemberInfo m)
+		{
+#if ENABLE_IL2CPP
+			return (m.GetCustomAttribute<CollationAttribute> ()?.Value) ?? "";
+#else
+			return
+				(m.CustomAttributes
+				 .Where (x => typeof (CollationAttribute) == x.AttributeType)
+				 .Select (x => {
+					 var args = x.ConstructorArguments;
+					 return args.Count > 0 ? ((args[0].Value as string) ?? "") : "";
+				 })
+				 .FirstOrDefault ()) ?? "";
+#endif
+		}
+
+		public bool IsAutoInc(MemberInfo m)
+		{
+			return m.CustomAttributes.Any (x => x.AttributeType == typeof (AutoIncrementAttribute));
+		}
+
+		public int? MaxStringLength (PropertyInfo p)
+		{
+#if ENABLE_IL2CPP
+			return p.GetCustomAttribute<MaxLengthAttribute> ()?.Value;
+#else
+			var attr = p.CustomAttributes.FirstOrDefault (x => x.AttributeType == typeof(MaxLengthAttribute));
+			if (attr != null) {
+				var attrv = (MaxLengthAttribute)Orm.InflateAttribute (attr);
+				return attrv.Value;
+			}
+
+			return null;
+#endif
+		}
+
+		public bool IsMarkedNotNull(MemberInfo p)
+		{
+			return p.CustomAttributes.Any (x => x.AttributeType == typeof (NotNullAttribute));
+		}
+
+		#endregion
 	}
 }
